@@ -145,7 +145,7 @@ typedef enum {
 } amd_vad_state_t;
 
 typedef struct {
-	const switch_core_session_t *session;
+	switch_core_session_t *session;
 	switch_channel_t *channel;
 	amd_vad_state_t state;
 	uint32_t frame_ms;
