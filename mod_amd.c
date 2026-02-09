@@ -158,6 +158,27 @@ typedef struct {
 	uint32_t in_greeting:1;
 } amd_vad_t;
 
+static void amd_fire_event(amd_vad_t *vad)
+{
+	switch_event_t *event;
+
+	if (switch_event_create_subclass(&event, SWITCH_EVENT_CUSTOM, "amd::result") != SWITCH_STATUS_SUCCESS) {
+		return;
+	}
+
+	switch_channel_event_set_data(vad->channel, event);
+
+	switch_event_add_header_string(
+		event, SWITCH_STACK_BOTTOM, "AMD-Result",
+		switch_channel_get_variable(vad->channel, "amd_result"));
+
+	switch_event_add_header_string(
+		event, SWITCH_STACK_BOTTOM, "AMD-Cause",
+		switch_channel_get_variable(vad->channel, "amd_cause"));
+
+	switch_event_fire(&event);
+}
+
 static amd_frame_classifier classify_frame(const switch_frame_t *f, const switch_codec_implementation_t *codec)
 {
 	int16_t *audio = f->data;
@@ -390,6 +411,7 @@ SWITCH_STANDARD_APP(amd_start_function)
 
 				switch_channel_set_variable(channel, "amd_result", "NOTSURE");
 				switch_channel_set_variable(channel, "amd_cause", "TOOLONG");
+				amd_fire_event(&vad);
 				break;
 			}
 		}
@@ -419,6 +441,7 @@ SWITCH_STANDARD_APP(amd_start_function)
 		}
 
 		if (complete) {
+			amd_fire_event(&vad);
 			break;
 		}
 	}
