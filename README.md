@@ -1,31 +1,90 @@
-Asterisk app_amd for FreeSWITCH
-===============================
+mod\_amd — Asterisk AMD for FreeSWITCH
+=======================================
 
-This is an implementation of Asterisk's answering machine detection (voice
-activity detection) for FreeSWITCH.
+`mod_amd` is a FreeSWITCH application module that implements Asterisk-style
+answering machine detection (AMD) using voice activity detection (VAD). It
+analyses the audio stream of an answered call in real time to determine whether
+the remote party is a **human** or an **answering machine**.
 
-Currently, in limited testing, we are able to get satisfactory results in
-determining what is a human and what is a machine, but there is much more to
-do:
+This is particularly useful for outbound dialling scenarios such as predictive
+diallers and automated call campaigns, where you want to route live humans to
+agents and handle machine answers differently (e.g. leave a voicemail or hang
+up).
 
-* Emit events when a decision is made (Not sure, Machine, or Human).
-* Make sure that we are unlocking and cleaning up where necessary.
+How It Works
+------------
+
+Once the `amd` application is invoked on a channel, the module reads raw audio
+frames and classifies each frame as either **voiced** or **silence** based on a
+configurable energy threshold. It then tracks:
+
+| Metric | Purpose |
+|---|---|
+| **Silence duration** | How long continuous silence has lasted |
+| **Voice duration** | How long continuous speech has lasted |
+| **Word count** | Number of distinct "words" (voice bursts separated by silence) |
+| **Greeting phase** | Whether the caller has started speaking (transitioned out of initial silence) |
+
+A decision is reached when one of the following conditions is met:
+
+| Result | Cause | Condition |
+|---|---|---|
+| `MACHINE` | `INITIALSILENCE` | Silence lasted longer than `initial_silence` before any speech was detected |
+| `MACHINE` | `LONGGREETING` | A single continuous utterance exceeded the `greeting` threshold |
+| `MACHINE` | `MAXWORDLENGTH` | A single word exceeded `maximum_word_length` |
+| `MACHINE` | `MAXWORDS` | The number of detected words reached `maximum_number_of_words` |
+| `HUMAN` | `HUMAN` | After the greeting, silence lasted longer than `after_greeting_silence` (typical of a human saying "Hello?" and waiting) |
+| `NOTSURE` | `TOOLONG` | The `total_analysis_time` expired without a definitive result |
+
+Prerequisites
+-------------
+
+- **FreeSWITCH** installed with development headers
+- **pkg-config** available and able to locate the FreeSWITCH `.pc` file
+- **GCC** (or a compatible C compiler)
 
 Building
 --------
 
-To build this module, all you need to do is type `make`, but because it relies
-on `pkg-config` and FreeSWITCH, you need to point `pkg-config` to where
-FreeSWITCH is installed before building:
+Point `pkg-config` at your FreeSWITCH installation and run `make`:
 
-```
-host$ export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig/
-host$ make
+```bash
+export PKG_CONFIG_PATH=/usr/local/freeswitch/lib/pkgconfig/
+make
 ```
 
-Sample Configuration
---------------------
-Just put a file like this in your freeswitch installation, in **conf/autoload_configs/amd.conf.xml**
+### Installing
+
+Install the compiled module into the FreeSWITCH modules directory:
+
+```bash
+make install
+```
+
+You can override the destination with `DESTDIR`:
+
+```bash
+make install DESTDIR=/opt/freeswitch
+```
+
+After installing, load the module from the FreeSWITCH CLI:
+
+```
+freeswitch> load mod_amd
+```
+
+To load it automatically on startup, add the following to
+`conf/autoload_configs/modules.conf.xml`:
+
+```xml
+<load module="mod_amd"/>
+```
+
+Configuration
+-------------
+
+Place the configuration file at **`conf/autoload_configs/amd.conf.xml`**:
+
 ```xml
 <configuration name="amd.conf" description="mod_amd Configuration">
   <settings>
@@ -41,3 +100,171 @@ Just put a file like this in your freeswitch installation, in **conf/autoload_co
   </settings>
 </configuration>
 ```
+
+### Parameter Reference
+
+| Parameter | Default | Description |
+|---|---|---|
+| `silence_threshold` | `256` | Energy threshold for classifying a frame as voiced vs. silent. Higher values require louder audio to be considered speech. |
+| `initial_silence` | `2500` | Maximum silence (ms) allowed before any speech is detected. If exceeded, the result is `MACHINE` / `INITIALSILENCE`. |
+| `greeting` | `1500` | Maximum duration (ms) of a single continuous utterance during the greeting phase. If exceeded, the result is `MACHINE` / `LONGGREETING`. |
+| `after_greeting_silence` | `800` | Silence duration (ms) after the greeting that indicates a human. A human typically says "Hello?" and then waits. |
+| `total_analysis_time` | `5000` | Total time (ms) allowed for analysis. If no decision is made within this window, the result is `NOTSURE` / `TOOLONG`. |
+| `min_word_length` | `100` | Minimum duration (ms) of continuous voice to be considered a word. |
+| `maximum_word_length` | `5000` | Maximum duration (ms) of a single word. If exceeded, the result is `MACHINE` / `MAXWORDLENGTH`. |
+| `between_words_silence` | `50` | Silence duration (ms) between words that separates one word from the next. |
+| `maximum_number_of_words` | `3` | Maximum number of words allowed. If exceeded, the result is `MACHINE` / `MAXWORDS`. |
+
+All parameters are reloadable — you can update the configuration and reload
+without restarting FreeSWITCH:
+
+```
+freeswitch> reloadxml
+freeswitch> reload mod_amd
+```
+
+Channel Variables
+-----------------
+
+After the `amd` application completes, two channel variables are set:
+
+| Variable | Values | Description |
+|---|---|---|
+| `amd_result` | `HUMAN`, `MACHINE`, `NOTSURE` | The detection result |
+| `amd_cause` | `HUMAN`, `INITIALSILENCE`, `LONGGREETING`, `MAXWORDLENGTH`, `MAXWORDS`, `TOOLONG` | The reason for the result |
+
+These variables can be used in your dialplan or scripts to branch call logic
+based on the detection outcome.
+
+Events
+------
+
+When a detection decision is made, `mod_amd` fires a custom event:
+
+- **Event**: `CUSTOM`
+- **Subclass**: `amd::result`
+- **Headers**:
+  - `AMD-Result` — the detection result (`HUMAN`, `MACHINE`, or `NOTSURE`)
+  - `AMD-Cause` — the cause of the result
+
+You can subscribe to this event from ESL (Event Socket Library) or any
+FreeSWITCH event consumer.
+
+Usage Examples
+--------------
+
+### Dialplan — Basic AMD with Branching
+
+Run AMD on an outbound call and branch based on the result:
+
+```xml
+<extension name="outbound_with_amd">
+  <condition field="destination_number" expression="^(\d+)$">
+    <!-- Bridge the call -->
+    <action application="bridge" data="sofia/gateway/my_gateway/$1"/>
+
+    <!-- Run AMD after the call is answered -->
+    <action application="amd"/>
+
+    <!-- Branch based on the result -->
+    <action application="log" data="INFO AMD result: ${amd_result}, cause: ${amd_cause}"/>
+
+    <action application="execute_extension" data="handle_${amd_result}"/>
+  </condition>
+</extension>
+
+<extension name="handle_HUMAN">
+  <condition field="destination_number" expression="^handle_HUMAN$">
+    <action application="log" data="INFO Human detected — transferring to agent queue"/>
+    <action application="transfer" data="agent_queue XML default"/>
+  </condition>
+</extension>
+
+<extension name="handle_MACHINE">
+  <condition field="destination_number" expression="^handle_MACHINE$">
+    <action application="log" data="INFO Machine detected — playing voicemail message"/>
+    <action application="playback" data="/usr/local/freeswitch/sounds/voicemail_message.wav"/>
+    <action application="hangup"/>
+  </condition>
+</extension>
+
+<extension name="handle_NOTSURE">
+  <condition field="destination_number" expression="^handle_NOTSURE$">
+    <action application="log" data="WARNING AMD could not determine — transferring to agent"/>
+    <action application="transfer" data="agent_queue XML default"/>
+  </condition>
+</extension>
+```
+
+### Dialplan — Simple Inline Check
+
+A simpler approach using inline conditions:
+
+```xml
+<extension name="amd_simple">
+  <condition field="destination_number" expression="^(\d+)$">
+    <action application="answer"/>
+    <action application="amd"/>
+
+    <!-- If machine, hang up -->
+    <action application="log" data="INFO AMD: ${amd_result} (${amd_cause})"/>
+  </condition>
+</extension>
+
+<extension name="amd_machine_hangup">
+  <condition field="${amd_result}" expression="^MACHINE$">
+    <action application="hangup" data="NORMAL_CLEARING"/>
+  </condition>
+</extension>
+```
+
+### Lua Script
+
+Use AMD from a Lua script:
+
+```lua
+-- Execute AMD (blocks until detection completes)
+session:execute("amd")
+
+-- Read the result
+local result = session:getVariable("amd_result")
+local cause  = session:getVariable("amd_cause")
+
+freeswitch.consoleLog("INFO", "AMD result: " .. result .. ", cause: " .. cause .. "\n")
+
+if result == "HUMAN" then
+    session:execute("transfer", "agent_queue XML default")
+elseif result == "MACHINE" then
+    session:execute("playback", "/usr/local/freeswitch/sounds/voicemail_message.wav")
+    session:hangup()
+else
+    -- NOTSURE — treat as human
+    session:execute("transfer", "agent_queue XML default")
+end
+```
+
+### ESL Event Subscription (Python)
+
+Subscribe to AMD events using the FreeSWITCH Event Socket Library:
+
+```python
+import ESL
+
+con = ESL.ESLconnection("127.0.0.1", "8021", "ClueCon")
+
+if con.connected():
+    con.events("plain", "CUSTOM amd::result")
+
+    while True:
+        event = con.recvEvent()
+        if event:
+            uuid   = event.getHeader("Unique-ID")
+            result = event.getHeader("AMD-Result")
+            cause  = event.getHeader("AMD-Cause")
+            print(f"Call {uuid}: {result} ({cause})")
+```
+
+License
+-------
+
+This project is open source. See the [LICENSE](LICENSE) file for details.
