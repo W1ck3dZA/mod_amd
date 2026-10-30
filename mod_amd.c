@@ -98,9 +98,20 @@ static switch_xml_config_item_t instructions[] = {
 
 static switch_status_t do_config(switch_bool_t reload)
 {
-	memset(&globals, 0, sizeof(globals));
+	switch_event_t *defaults = NULL;
+
+	/*
+	 * Apply the defaults first. switch_xml_config_parse_module_settings()
+	 * only fills in defaults when amd.conf exists and has a <settings>
+	 * block, so without this a missing config leaves every value at 0 and
+	 * every call is classified as MACHINE on its first frame.
+	 */
+	switch_event_create_plain(&defaults, SWITCH_EVENT_CHANNEL_DATA);
+	switch_xml_config_parse_event(defaults, 0, reload, instructions);
+	switch_event_destroy(&defaults);
 
 	if (switch_xml_config_parse_module_settings("amd.conf", reload, instructions) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "AMD: Unable to load amd.conf, using defaults\n");
 		return SWITCH_STATUS_FALSE;
 	}
 
@@ -339,7 +350,7 @@ SWITCH_STANDARD_APP(amd_start_function)
 	switch_frame_t *read_frame;
 	switch_status_t status;
 	uint32_t timeout_ms = globals.total_analysis_time;
-	int32_t sample_count_limit;
+	int32_t sample_count_limit = 0;
 	switch_bool_t complete = SWITCH_FALSE;
 
 	amd_vad_t vad = { 0 };
